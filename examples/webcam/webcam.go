@@ -19,10 +19,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FlorianArnould/go4vl/device"
+	"github.com/FlorianArnould/go4vl/v4l2"
 	pigo "github.com/esimov/pigo/core"
 	"github.com/fogleman/gg"
-	"github.com/vladimirvivien/go4vl/device"
-	"github.com/vladimirvivien/go4vl/v4l2"
 )
 
 var (

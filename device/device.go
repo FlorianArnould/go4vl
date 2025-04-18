@@ -7,7 +7,7 @@ import (
 	"os"
 	sys "syscall"
 
-	"github.com/vladimirvivien/go4vl/v4l2"
+	"github.com/FlorianArnould/go4vl/v4l2"
 )
 
 type Device struct {

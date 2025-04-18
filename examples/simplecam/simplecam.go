@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"net/textproto"
 
-	"github.com/vladimirvivien/go4vl/device"
-	"github.com/vladimirvivien/go4vl/v4l2"
+	"github.com/FlorianArnould/go4vl/device"
+	"github.com/FlorianArnould/go4vl/v4l2"
 )
 
 var (

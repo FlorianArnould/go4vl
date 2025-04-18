@@ -40,7 +40,7 @@ The package should work with no problem on your 64-bit Linux OS.
 To include `go4vl` in your own code, `go get` the package:
 
 ```bash
-go get github.com/vladimirvivien/go4vl/v4l2
+go get github.com/FlorianArnould/go4vl/v4l2
 ```
 
 ## Video capture example
