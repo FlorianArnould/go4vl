@@ -21,6 +21,7 @@ type Device struct {
 	buffers      [][]byte
 	requestedBuf v4l2.RequestBuffers
 	streaming    bool
+	request      chan struct{}
 	output       chan []byte
 }
 
@@ -65,6 +66,7 @@ func Open(path string, options ...Option) (*Device, error) {
 		// setup capture parameters and chan for captured data
 		dev.bufType = v4l2.BufTypeVideoCapture
 		dev.output = make(chan []byte, dev.config.bufSize)
+		dev.request = make(chan struct{}, 1)
 	case cap.IsVideoOutputSupported():
 		dev.bufType = v4l2.BufTypeVideoOutput
 	default:
@@ -154,6 +156,7 @@ func (d *Device) MemIOType() v4l2.IOType {
 // GetOutput returns the channel that outputs streamed data that is
 // captured from the underlying device driver.
 func (d *Device) GetOutput() <-chan []byte {
+	d.request <- struct{}{}
 	return d.output
 }
 
@@ -387,6 +390,8 @@ func (d *Device) startStreamLoop(ctx context.Context) error {
 		ioMemType := d.MemIOType()
 		bufType := d.BufferType()
 		waitForRead := v4l2.WaitForRead(d)
+		requested := false
+
 		for {
 			select {
 			// handle stream capture (read from driver)
@@ -400,20 +405,21 @@ func (d *Device) startStreamLoop(ctx context.Context) error {
 				}
 
 				// copy mapped buffer (copying avoids polluted data from subsequent dequeue ops)
-				if buff.Flags&v4l2.BufFlagMapped != 0 && buff.Flags&v4l2.BufFlagError == 0 {
+				if requested && buff.Flags&v4l2.BufFlagMapped != 0 && buff.Flags&v4l2.BufFlagError == 0 {
 					frame = make([]byte, buff.BytesUsed)
 					if n := copy(frame, d.buffers[buff.Index][:buff.BytesUsed]); n == 0 {
 						d.output <- []byte{}
 					}
 					d.output <- frame
 					frame = nil
-				} else {
-					d.output <- []byte{}
+					requested = false
 				}
 
 				if _, err := v4l2.QueueBuffer(fd, ioMemType, bufType, buff.Index); err != nil {
 					panic(fmt.Sprintf("device: stream loop queue: %s: buff: %#v", err, buff))
 				}
+			case <-d.request:
+				requested = true
 			case <-ctx.Done():
 				d.Stop()
 				return
