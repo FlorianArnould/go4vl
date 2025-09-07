@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	sys "syscall"
 
 	"github.com/FlorianArnould/go4vl/v4l2"
@@ -23,10 +24,12 @@ type Device struct {
 	streaming    bool
 	request      chan struct{}
 	output       chan []byte
+	stopMutex    sync.Mutex
+	stopChan     chan struct{}
 }
 
-// Open creates opens the underlying device at specified path for streaming.
-// It returns a *Device or an error if unable to open device.
+// Open creates opens the underlying device at a specified path for streaming.
+// It returns a *Device or an error if unable to open a device.
 func Open(path string, options ...Option) (*Device, error) {
 	fd, err := v4l2.OpenDevice(path, sys.O_RDWR|sys.O_NONBLOCK, 0)
 	if err != nil {
@@ -42,32 +45,32 @@ func Open(path string, options ...Option) (*Device, error) {
 	}
 
 	// get capability
-	cap, err := v4l2.GetCapability(dev.fd)
+	c, err := v4l2.GetCapability(dev.fd)
 	if err != nil {
 		if err := v4l2.CloseDevice(dev.fd); err != nil {
 			return nil, fmt.Errorf("device %s: closing after failure: %s", path, err)
 		}
 		return nil, fmt.Errorf("device open: %s: %w", path, err)
 	}
-	dev.cap = cap
+	dev.cap = c
 
 	// set preferred device buffer size
 	if dev.config.bufSize == 0 {
 		dev.config.bufSize = 2
 	}
 
-	// only supports streaming IO model right now
+	// only supports a streaming IO model right now
 	if !dev.cap.IsStreamingSupported() {
 		return nil, fmt.Errorf("device open: device does not support streamingIO")
 	}
 
 	switch {
-	case cap.IsVideoCaptureSupported():
+	case c.IsVideoCaptureSupported():
 		// setup capture parameters and chan for captured data
 		dev.bufType = v4l2.BufTypeVideoCapture
 		dev.output = make(chan []byte, dev.config.bufSize)
 		dev.request = make(chan struct{}, 1)
-	case cap.IsVideoOutputSupported():
+	case c.IsVideoOutputSupported():
 		dev.bufType = v4l2.BufTypeVideoOutput
 	default:
 		if err := v4l2.CloseDevice(dev.fd); err != nil {
@@ -105,7 +108,7 @@ func Open(path string, options ...Option) (*Device, error) {
 	return dev, nil
 }
 
-// Close closes the underlying device associated with `d` .
+// Close closes the underlying device associated with `d`.
 func (d *Device) Close() error {
 	if d.streaming {
 		if err := d.Stop(); err != nil {
@@ -125,8 +128,8 @@ func (d *Device) Fd() uintptr {
 	return d.fd
 }
 
-// Buffers returns the internal mapped buffers. This method should be
-// called after streaming has been started otherwise it may return nil.
+// Buffers return the internal mapped buffers. This method should be
+// called after streaming has been started, otherwise it may return nil.
 func (d *Device) Buffers() [][]byte {
 	return d.buffers
 }
@@ -136,13 +139,13 @@ func (d *Device) Capability() v4l2.Capability {
 	return d.cap
 }
 
-// BufferType this is a convenience method that returns the device mode (i.e. Capture, Output, etc)
+// BufferType this is a convenience method that returns the device mode (i.e. Capture, Output, etc.)
 // Use method Capability for detail about the device.
 func (d *Device) BufferType() v4l2.BufType {
 	return d.bufType
 }
 
-// BufferCount returns configured number of buffers to be used during streaming.
+// BufferCount returns the configured number of buffers to be used during streaming.
 // If called after streaming start, this value could be updated by the driver.
 func (d *Device) BufferCount() v4l2.BufType {
 	return d.config.bufSize
@@ -162,7 +165,7 @@ func (d *Device) GetOutput() <-chan []byte {
 
 // SetInput sets up an input channel for data this sent for output to the
 // underlying device driver.
-func (d *Device) SetInput(in <-chan []byte) {
+func (d *Device) SetInput(_ <-chan []byte) {
 
 }
 
@@ -351,8 +354,21 @@ func (d *Device) Start(ctx context.Context) error {
 }
 
 func (d *Device) Stop() error {
+	return d.stop(true)
+}
+
+func (d *Device) stop(fromOutside bool) error {
 	if !d.streaming {
 		return nil
+	}
+	d.stopMutex.Lock()
+	defer d.stopMutex.Unlock()
+	if !d.streaming {
+		return nil
+	}
+
+	if fromOutside {
+		d.stopChan <- struct{}{}
 	}
 	if err := v4l2.UnmapMemoryBuffers(d); err != nil {
 		return fmt.Errorf("device: stop: %w", err)
@@ -364,7 +380,7 @@ func (d *Device) Stop() error {
 	return nil
 }
 
-// startStreamLoop sets up the loop to run until context is cancelled, and returns immediately
+// startStreamLoop sets up the loop to run until context is canceled and returns immediately
 // and report any errors. The loop runs in a separate goroutine and uses the sys.Select to trigger
 // capture events.
 func (d *Device) startStreamLoop(ctx context.Context) error {
@@ -394,6 +410,13 @@ func (d *Device) startStreamLoop(ctx context.Context) error {
 
 		for {
 			select {
+			case <-d.stopChan:
+				return
+			case <-ctx.Done():
+				_ = d.stop(false)
+				return
+			case <-d.request:
+				requested = true
 			// handle stream capture (read from driver)
 			case <-waitForRead:
 				buff, err := v4l2.DequeueBuffer(fd, ioMemType, bufType)
@@ -418,11 +441,6 @@ func (d *Device) startStreamLoop(ctx context.Context) error {
 				if _, err := v4l2.QueueBuffer(fd, ioMemType, bufType, buff.Index); err != nil {
 					panic(fmt.Sprintf("device: stream loop queue: %s: buff: %#v", err, buff))
 				}
-			case <-d.request:
-				requested = true
-			case <-ctx.Done():
-				d.Stop()
-				return
 			}
 		}
 	}()
