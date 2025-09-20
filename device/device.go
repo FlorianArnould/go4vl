@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	sys "syscall"
 
 	"github.com/FlorianArnould/go4vl/v4l2"
@@ -21,6 +22,8 @@ type Device struct {
 	buffers      [][]byte
 	requestedBuf v4l2.RequestBuffers
 	streaming    bool
+	cancel       context.CancelFunc
+	waitGroup    sync.WaitGroup
 	request      chan struct{}
 	output       chan []byte
 }
@@ -33,7 +36,7 @@ func Open(path string, options ...Option) (*Device, error) {
 		return nil, fmt.Errorf("device open: %w", err)
 	}
 
-	dev := &Device{path: path, config: config{}, fd: fd}
+	dev := &Device{path: path, config: config{}, fd: fd, cancel: func() {}}
 	// apply options
 	if len(options) > 0 {
 		for _, o := range options {
@@ -107,11 +110,7 @@ func Open(path string, options ...Option) (*Device, error) {
 
 // Close closes the underlying device associated with `d` .
 func (d *Device) Close() error {
-	if d.streaming {
-		if err := d.Stop(); err != nil {
-			return err
-		}
-	}
+	d.Stop()
 	return v4l2.CloseDevice(d.fd)
 }
 
@@ -350,7 +349,12 @@ func (d *Device) Start(ctx context.Context) error {
 	return nil
 }
 
-func (d *Device) Stop() error {
+func (d *Device) Stop() {
+	d.cancel()
+	d.waitGroup.Wait()
+}
+
+func (d *Device) stop() error {
 	if !d.streaming {
 		return nil
 	}
@@ -368,6 +372,8 @@ func (d *Device) Stop() error {
 // and report any errors. The loop runs in a separate goroutine and uses the sys.Select to trigger
 // capture events.
 func (d *Device) startStreamLoop(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	d.cancel = cancel
 	d.output = make(chan []byte, d.config.bufSize)
 
 	// Initial enqueue of buffers for capture
@@ -382,8 +388,11 @@ func (d *Device) startStreamLoop(ctx context.Context) error {
 		return fmt.Errorf("device: stream on: %w", err)
 	}
 
+	d.waitGroup.Add(1)
 	go func() {
+		defer d.waitGroup.Done()
 		defer close(d.output)
+		defer d.stop()
 
 		fd := d.Fd()
 		var frame []byte
@@ -421,7 +430,6 @@ func (d *Device) startStreamLoop(ctx context.Context) error {
 			case <-d.request:
 				requested = true
 			case <-ctx.Done():
-				d.Stop()
 				return
 			}
 		}

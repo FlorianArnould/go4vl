@@ -23,5 +23,5 @@ type StreamingDevice interface {
 	BufferType() BufType
 	BufferCount() uint32
 	Start(context.Context) error
-	Stop() error
+	Stop()
 }
